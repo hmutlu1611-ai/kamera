@@ -14,9 +14,18 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
-      - name: APK derle
+      - name: Zip'i ac
+        run: for f in *.zip; do unzip -o "$f"; done
+      - name: Ana kamera APK
+        working-directory: MakroKamera
         run: gradle :app:assembleDebug
+      - name: USB Mikroskop APK
+        working-directory: MakroKamera
+        continue-on-error: true
+        run: gradle :usb:assembleDebug
       - uses: actions/upload-artifact@v4
         with:
           name: MakroKamera-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: |
+            MakroKamera/app/build/outputs/apk/debug/*.apk
+            MakroKamera/usb/build/outputs/apk/debug/*.apk

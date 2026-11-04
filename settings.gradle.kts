@@ -7,3 +7,4 @@ dependencyResolutionManagement {
 }
 rootProject.name = "MakroKamera"
 include(":app")
+include(":usb")

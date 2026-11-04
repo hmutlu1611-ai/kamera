@@ -6,20 +6,31 @@ import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.ImageFormat
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
+import android.os.Build
 import android.hardware.camera2.CaptureRequest
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Size
+import android.content.res.Configuration
 import android.view.KeyEvent
+import android.view.OrientationEventListener
+import android.view.Surface
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
 import android.widget.Button
+import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -30,6 +41,7 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.Camera2CameraInfo
@@ -82,6 +94,9 @@ class MainActivity : AppCompatActivity() {
         private const val MODE_PHOTO = 0
         private const val MODE_STACK = 1
         private const val MODE_SUPER = 2
+        private const val MODE_FIELD = 3
+        private const val FIELD_FRAMES = 14
+        private const val FIELD_MAX = 4608
     }
 
     private lateinit var previewView: PreviewView
@@ -89,6 +104,13 @@ class MainActivity : AppCompatActivity() {
     private lateinit var focusRing: View
     private lateinit var btnMacro: Button
     private lateinit var btnMicro: Button
+    private lateinit var btnCase: Button
+    private lateinit var btnLog: Button
+    private lateinit var btnDigital: Button
+    private lateinit var btnHires: Button
+    private lateinit var btnDiag: Button
+    private var digitalZoom = false
+    private var hiRes = true
     private lateinit var statusText: TextView
     private lateinit var modeViews: List<TextView>
     private lateinit var btnLens: Button
@@ -149,6 +171,78 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+    /** Telefon/katlanabilir ekran hangi yönde tutulursa tutulsun fotoğraf doğru dönsün. */
+    private val orientationListener by lazy {
+        object : OrientationEventListener(this) {
+            override fun onOrientationChanged(o: Int) {
+                if (o == ORIENTATION_UNKNOWN) return
+                val rot = when {
+                    o >= 315 || o < 45 -> Surface.ROTATION_0
+                    o < 135 -> Surface.ROTATION_270
+                    o < 225 -> Surface.ROTATION_180
+                    else -> Surface.ROTATION_90
+                }
+                imageCapture?.targetRotation = rot
+            }
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // Katlanabilir telefon açılıp kapanınca kamerayı yeniden başlatmadan yerleşimi uyarla
+        previewView.post { previewView.requestLayout() }
+    }
+
+    // Telefon elde titriyor mu? (jiroskop) Saha modunda sadece sabitken kare çekilir.
+    @Volatile private var lastMotion = 0L
+    private val gyroListener = object : SensorEventListener {
+        override fun onSensorChanged(e: SensorEvent) {
+            val m = kotlin.math.sqrt(e.values[0] * e.values[0] + e.values[1] * e.values[1] + e.values[2] * e.values[2])
+            if (m > 0.06f) lastMotion = System.currentTimeMillis()
+        }
+        override fun onAccuracyChanged(s: Sensor?, a: Int) {}
+    }
+    private var hasGyro = false
+
+    override fun onStart() {
+        super.onStart()
+        if (orientationListener.canDetectOrientation()) orientationListener.enable()
+        val sm = getSystemService(SENSOR_SERVICE) as SensorManager
+        val g = sm.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+        hasGyro = g != null
+        if (g != null) sm.registerListener(gyroListener, g, SensorManager.SENSOR_DELAY_GAME)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        orientationListener.disable()
+        (getSystemService(SENSOR_SERVICE) as SensorManager).unregisterListener(gyroListener)
+    }
+
+    /** Telefon ~0.4 sn kıpırdamayana kadar bekler (en fazla maxMs). */
+    private suspend fun awaitSteady(maxMs: Long = 4000) {
+        if (!hasGyro) { delay(300); return }
+        val start = System.currentTimeMillis()
+        while (System.currentTimeMillis() - start < maxMs) {
+            if (System.currentTimeMillis() - lastMotion > 400) return
+            delay(40)
+        }
+    }
+
+    /** Saha modu: en yakına odaklanan lens + ışık, dijital zoom kapalı. */
+    private fun enterFieldMode() {
+        torchOn = true
+        btnTorch.text = "Işık ●"
+        if (!macroMode) toggleMacro() else camera?.cameraControl?.enableTorch(true)
+        if (digitalZoom) {
+            digitalZoom = false
+            getSharedPreferences("ayar", MODE_PRIVATE).edit().putBoolean("dijital", false).apply()
+            refreshDigitalButton()
+            applyZoomLimit()
+        }
+        toast("Saha modu: makro lens ve ışık açıldı. Telefonu kâğıda/yüzeye dayayıp çek, 14 kare çekilir, en netleri birleştirilir.")
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -166,9 +260,17 @@ class MainActivity : AppCompatActivity() {
         focusRing = findViewById(R.id.focusRing)
         btnMacro = findViewById(R.id.btnMacro)
         btnMicro = findViewById(R.id.btnMicro)
+        btnCase = findViewById(R.id.btnCase)
+        btnLog = findViewById(R.id.btnLog)
+        btnDigital = findViewById(R.id.btnDigital)
+        btnHires = findViewById(R.id.btnHires)
+        btnDiag = findViewById(R.id.btnDiag)
+        hiRes = getSharedPreferences("ayar", MODE_PRIVATE).getBoolean("yuksek", true)
+        digitalZoom = getSharedPreferences("ayar", MODE_PRIVATE).getBoolean("dijital", false)
         statusText = findViewById(R.id.statusText)
         modeViews = listOf(
-            findViewById<TextView>(R.id.modePhoto), findViewById<TextView>(R.id.modeStack), findViewById<TextView>(R.id.modeSuper)
+            findViewById<TextView>(R.id.modePhoto), findViewById<TextView>(R.id.modeStack),
+            findViewById<TextView>(R.id.modeSuper), findViewById<TextView>(R.id.modeField)
         )
         btnLens = findViewById(R.id.btnLens)
         btnTorch = findViewById(R.id.btnTorch)
@@ -194,7 +296,7 @@ class MainActivity : AppCompatActivity() {
                 lensIndex = (lensIndex + 1) % backCameras.size
                 totalZoom = 1f
                 bindCamera()
-            } else toast("Telefon başka bir arka lensi uygulamalara açmıyor")
+            } else toast("Telefon başka bir lensi uygulamalara açmıyor. USB mikroskop takılıysa ve telefon onu kamera olarak tanırsa burada görünür.")
         }
         btnTorch.setOnClickListener {
             torchOn = !torchOn
@@ -209,6 +311,31 @@ class MainActivity : AppCompatActivity() {
         btnAf.setOnClickListener { resetAutoFocus() }
         btnCapture.setOnClickListener { onShutter() }
         btnMicro.setOnClickListener { toggleMicro() }
+        btnCase.setOnClickListener { showCaseDialog() }
+        refreshHiresButton()
+        btnHires.setOnClickListener {
+            hiRes = !hiRes
+            getSharedPreferences("ayar", MODE_PRIVATE).edit().putBoolean("yuksek", hiRes).apply()
+            refreshHiresButton()
+            bindCamera()
+            toast(if (hiRes) "Yüksek çözünürlük açık: telefon destekliyorsa tam sensör (50 MP ve üstü) çekilir. Çekim biraz yavaşlar." else "Yüksek çözünürlük kapalı: hızlı ama daha az piksel.")
+        }
+        btnDiag.setOnClickListener { showCameraInfo() }
+        refreshDigitalButton()
+        btnDigital.setOnClickListener {
+            digitalZoom = !digitalZoom
+            getSharedPreferences("ayar", MODE_PRIVATE).edit().putBoolean("dijital", digitalZoom).apply()
+            refreshDigitalButton()
+            applyZoomLimit()
+            toast(if (digitalZoom) "Dijital zoom açık: telefonun sınırının ötesine büyütür, ama gren artar ve ayrıntı kazanılmaz." else "Dijital zoom kapalı: sadece gerçek (optik) yakınlaştırma, en net görüntü.")
+        }
+        refreshLogButton()
+        btnLog.setOnClickListener {
+            getSharedPreferences(EvidenceLog.PREFS, MODE_PRIVATE).edit()
+                .putBoolean("kayit", !EvidenceLog.enabled(this)).apply()
+            refreshLogButton()
+            toast(if (EvidenceLog.enabled(this)) "Her çekime kayıt dosyası (SHA-256 ile) yazılacak: Documents/MakroKamera" else "Kayıt dosyası yazımı kapatıldı")
+        }
         modeViews.forEachIndexed { i, v ->
             v.setOnClickListener {
                 mode = i
@@ -216,6 +343,7 @@ class MainActivity : AppCompatActivity() {
                 when (i) {
                     MODE_STACK -> toast("Odak yığını: $STACK_FRAMES kare farklı odakta çekilir, her yeri net tek foto olur. Telefonu bir yere dayayarak kullan.")
                     MODE_SUPER -> toast("Süper detay: $SUPER_FRAMES kare birleştirilir, gren azalır, ince doku belirginleşir. Telefonu sabit tut.")
+                    MODE_FIELD -> enterFieldMode()
                 }
             }
         }
@@ -351,6 +479,11 @@ class MainActivity : AppCompatActivity() {
         Camera2CameraInfo.from(info)
             .getCameraCharacteristic(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
 
+    private fun isExternal(info: CameraInfo) =
+        Camera2CameraInfo.from(info)
+            .getCameraCharacteristic(CameraCharacteristics.LENS_FACING) ==
+                CameraCharacteristics.LENS_FACING_EXTERNAL
+
     private fun isBack(info: CameraInfo) =
         Camera2CameraInfo.from(info)
             .getCameraCharacteristic(CameraCharacteristics.LENS_FACING) ==
@@ -362,7 +495,8 @@ class MainActivity : AppCompatActivity() {
             val provider = future.get()
             cameraProvider = provider
             val all = provider.availableCameraInfos
-            backCameras = all.filter { isBack(it) }.ifEmpty { all }
+            // Arka lensler + (telefon kamera olarak tanıyorsa) USB mikroskop gibi harici kameralar
+            backCameras = (all.filter { isBack(it) } + all.filter { isExternal(it) }).ifEmpty { all }
             lensIndex = 0
             bindCamera()
         }, ContextCompat.getMainExecutor(this))
@@ -378,9 +512,20 @@ class MainActivity : AppCompatActivity() {
 
         val resolution = ResolutionSelector.Builder()
             .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
+            .setAllowedResolutionMode(
+                if (hiRes) ResolutionSelector.PREFER_HIGHER_RESOLUTION_OVER_CAPTURE_RATE
+                else ResolutionSelector.PREFER_CAPTURE_RATE_OVER_HIGHER_RESOLUTION
+            )
             .build()
 
-        val preview = Preview.Builder().build().also {
+        val previewBuilder = Preview.Builder()
+        Camera2Interop.Extender(previewBuilder)
+            .setCaptureRequestOption(
+                CaptureRequest.NOISE_REDUCTION_MODE,
+                CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY
+            )
+            .setCaptureRequestOption(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_HIGH_QUALITY)
+        val preview = previewBuilder.build().also {
             it.setSurfaceProvider(previewView.surfaceProvider)
         }
 
@@ -418,17 +563,17 @@ class MainActivity : AppCompatActivity() {
         focusSeek.progress = 0
         focusText.text = if (minFocusDiopter > 0f) "Odak: Otomatik" else "Odak: sabit odaklı lens"
         val closest = if (minFocusDiopter > 0f) "%.1f cm".format(100f / minFocusDiopter) else "-"
-        infoText.text = "Lens ${lensIndex + 1}/${backCameras.size}  •  En yakın odak: $closest"
-        btnLens.text = "Lens ${lensIndex + 1}"
+        val ext = isExternal(info)
+        infoText.text = (if (ext) "USB kamera" else "Lens ${lensIndex + 1}/${backCameras.size}") +
+                "  •  En yakın odak: $closest"
+        btnLens.text = if (ext) "USB" else "Lens ${lensIndex + 1}"
 
         // Kameranın gerçek yakınlaştırma sınırları açılınca belli olur
         cam.cameraInfo.zoomState.observe(this) { z ->
             if (z.maxZoomRatio != camMax || z.minZoomRatio != camMin) {
                 camMin = z.minZoomRatio
                 camMax = z.maxZoomRatio
-                maxTotalZoom = camMax * EXTRA_ZOOM
-                buildPresets()
-                setTotalZoom(totalZoom)
+                applyZoomLimit()
             }
         }
 
@@ -444,7 +589,6 @@ class MainActivity : AppCompatActivity() {
         evText.text = "Pozlama: ${exp.exposureCompensationIndex}"
 
         if (torchOn) cam.cameraControl.enableTorch(true)
-        touchLayer.post { focusAt(touchLayer.width / 2f, touchLayer.height / 2f, false, true) }
     }
 
     private fun toggleMacro() {
@@ -509,8 +653,9 @@ class MainActivity : AppCompatActivity() {
         val point = previewView.meteringPointFactory.createPoint(lx, ly, size)
         val flags = if (afOnly) FocusMeteringAction.FLAG_AF
         else FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
-        // Otomatik iptal kapalı: netleme o noktada kalır ve sürekli takip eder
-        val action = FocusMeteringAction.Builder(point, flags).disableAutoCancel().build()
+        // Birkaç saniye sonra kilit kalkar ve telefonun sürekli otomatik netlemesi devam eder
+        val action = FocusMeteringAction.Builder(point, flags)
+            .setAutoCancelDuration(if (afOnly) 2 else 3, TimeUnit.SECONDS).build()
         cam.cameraControl.startFocusAndMetering(action)
         if (showRing) {
             focusRing.x = x - focusRing.width / 2f
@@ -519,6 +664,125 @@ class MainActivity : AppCompatActivity() {
             focusRing.alpha = 1f
             focusRing.animate().alpha(0f).setStartDelay(700).setDuration(400).start()
         }
+    }
+
+    // ---------------- Vaka bilgisi ve kayıt ----------------
+
+    private fun refreshHiresButton() {
+        btnHires.text = if (hiRes) "Yüksek çözünürlük: AÇIK" else "Yüksek çözünürlük: KAPALI"
+    }
+
+    /** Telefondaki tüm kameraların gerçek özellikleri: çözünürlük, en yakın odak, odak modları. */
+    private fun showCameraInfo() {
+        val cm = getSystemService(CAMERA_SERVICE) as CameraManager
+        val sb = StringBuilder()
+        fun mp(w: Int, h: Int) = "%.1f MP (%d x %d)".format(w.toLong() * h / 1_000_000.0, w, h)
+        for (id in cm.cameraIdList) {
+            try {
+                val c = cm.getCameraCharacteristics(id)
+                val facing = when (c.get(CameraCharacteristics.LENS_FACING)) {
+                    CameraCharacteristics.LENS_FACING_BACK -> "arka"
+                    CameraCharacteristics.LENS_FACING_FRONT -> "ön"
+                    else -> "harici"
+                }
+                val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                val big = map?.getOutputSizes(ImageFormat.JPEG)?.maxByOrNull { it.width.toLong() * it.height }
+                val hi = map?.getHighResolutionOutputSizes(ImageFormat.JPEG)?.maxByOrNull { it.width.toLong() * it.height }
+                val maxRes = if (Build.VERSION.SDK_INT >= 31)
+                    c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION)
+                        ?.getOutputSizes(ImageFormat.JPEG)?.maxByOrNull { it.width.toLong() * it.height }
+                else null
+                val minF = c.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
+                val fl = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull()
+                val af = c.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)?.size ?: 0
+                sb.append("Kamera $id ($facing)\n")
+                if (big != null) sb.append("  Normal en büyük: ${mp(big.width, big.height)}\n")
+                if (hi != null) sb.append("  Yüksek çözünürlük: ${mp(hi.width, hi.height)}\n")
+                if (maxRes != null) sb.append("  Tam sensör modu: ${mp(maxRes.width, maxRes.height)}\n")
+                sb.append(if (minF > 0f) "  En yakın odak: %.1f cm\n".format(100f / minF) else "  Sabit odak (otomatik netleme yok)\n")
+                if (fl != null) sb.append("  Odak uzaklığı: %.1f mm\n".format(fl))
+                sb.append("  Odak modu sayısı: $af\n\n")
+            } catch (e: Exception) {
+                sb.append("Kamera $id: okunamadı\n\n")
+            }
+        }
+        val used = backCameras.getOrNull(lensIndex)?.let { cameraId(it) } ?: "?"
+        sb.append("Şu an kullanılan: kamera $used\nYüksek çözünürlük ayarı: ${if (hiRes) "açık" else "kapalı"}")
+        AlertDialog.Builder(this)
+            .setTitle("Kamera bilgisi")
+            .setMessage(sb.toString())
+            .setPositiveButton("Tamam", null)
+            .show()
+    }
+
+    private fun refreshDigitalButton() {
+        btnDigital.text = if (digitalZoom) "Dijital zoom: AÇIK" else "Dijital zoom: KAPALI"
+    }
+
+    private fun applyZoomLimit() {
+        maxTotalZoom = if (digitalZoom) camMax * EXTRA_ZOOM else camMax
+        buildPresets()
+        setTotalZoom(totalZoom)
+    }
+
+    private fun refreshLogButton() {
+        btnLog.text = if (EvidenceLog.enabled(this)) "Kayıt: AÇIK" else "Kayıt: KAPALI"
+    }
+
+    private fun showCaseDialog() {
+        val prefs = getSharedPreferences(EvidenceLog.PREFS, MODE_PRIVATE)
+        val dp = resources.displayMetrics.density
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
+        box.setPadding((20 * dp).toInt(), (8 * dp).toInt(), (20 * dp).toInt(), 0)
+        val fNo = EditText(this)
+        fNo.hint = "Dosya / vaka no"
+        fNo.setText(prefs.getString("no", ""))
+        val fWho = EditText(this)
+        fWho.hint = "İnceleyen"
+        fWho.setText(prefs.getString("inceleyen", ""))
+        val fNote = EditText(this)
+        fNote.hint = "Not"
+        fNote.setText(prefs.getString("not", ""))
+        box.addView(fNo)
+        box.addView(fWho)
+        box.addView(fNote)
+        AlertDialog.Builder(this)
+            .setTitle("Vaka bilgisi")
+            .setMessage("Bu bilgiler sonraki her çekimin kayıt dosyasına yazılır.")
+            .setView(box)
+            .setPositiveButton("Kaydet") { _, _ ->
+                prefs.edit()
+                    .putString("no", fNo.text.toString())
+                    .putString("inceleyen", fWho.text.toString())
+                    .putString("not", fNote.text.toString())
+                    .apply()
+            }
+            .setNegativeButton("İptal", null)
+            .show()
+    }
+
+    /** Çekim anındaki ayarlar (ana iş parçacığında alınır). */
+    private fun captureDetails(modeName: String): List<Pair<String, String>> {
+        val info = backCameras.getOrNull(lensIndex)
+        val ext = info != null && isExternal(info)
+        val focus = if (manualFocus && minFocusDiopter > 0f && focusSeek.progress > 0)
+            "manuel, yaklaşık %.1f cm".format(100f / (minFocusDiopter * focusSeek.progress / 100f))
+        else "otomatik"
+        return listOf(
+            "Çekim modu" to modeName,
+            "Kamera" to (if (ext) "harici (USB)" else "lens ${lensIndex + 1}/${backCameras.size}"),
+            "Yakınlaştırma" to "%.1fx (kamera %.1fx, dijital %.1fx)".format(totalZoom, totalZoom / extraZoom, extraZoom),
+            "Odak" to focus,
+            "Pozlama indeksi" to "${evSeek.progress + evLower}",
+            "Fener" to (if (torchOn) "açık" else "kapalı"),
+            "Makro modu" to (if (macroMode) "açık" else "kapalı"),
+            "Mikro modu" to (if (microMode) "açık" else "kapalı")
+        )
+    }
+
+    private fun writeRecord(uri: Uri, kind: String, details: List<Pair<String, String>>) {
+        if (EvidenceLog.enabled(this)) EvidenceLog.write(this, uri, kind, details)
     }
 
     // ---------------- Mikro modu ----------------
@@ -575,6 +839,7 @@ class MainActivity : AppCompatActivity() {
         when (mode) {
             MODE_STACK -> runMultiFrame(true)
             MODE_SUPER -> runMultiFrame(false)
+            MODE_FIELD -> runMultiFrame(false, true)
             else -> if (microMode) {
                 lifecycleScope.launch {
                     setBusy(true)
@@ -623,7 +888,7 @@ class MainActivity : AppCompatActivity() {
         else Camera2CameraControl.from(cam.cameraControl).clearCaptureRequestOptions()
     }
 
-    private fun runMultiFrame(focusMode: Boolean) {
+    private fun runMultiFrame(focusMode: Boolean, field: Boolean = false) {
         val cam = camera ?: return
         val ic = imageCapture ?: return
         if (focusMode && (minFocusDiopter <= 0f || !supportsManual)) {
@@ -632,18 +897,32 @@ class MainActivity : AppCompatActivity() {
         }
         setBusy(true)
         val extra = extraZoom
-        val frames = if (focusMode) STACK_FRAMES else SUPER_FRAMES
-        val maxSide = if (focusMode) STACK_MAX else SUPER_MAX
+        val frames = if (field) FIELD_FRAMES else if (focusMode) STACK_FRAMES else SUPER_FRAMES
+        val maxSide = if (field) FIELD_MAX else if (focusMode) STACK_MAX else SUPER_MAX
         val c2 = Camera2CameraControl.from(cam.cameraControl)
         val (near, far) = focusRange()
-        val title = if (focusMode) "Odak yığını" else "Süper detay"
+        val title = if (field) "Saha mikroskop" else if (focusMode) "Odak yığını" else "Süper detay"
+        val baseDetails = captureDetails(title) + ("Çekilen kare" to "$frames")
 
         lifecycleScope.launch {
             try {
                 countdown(2)
                 val session = StackSession(focusMode)
+                if (field) {
+                    // Odağı ekran ortasında kilitle: tüm kareler aynı mesafede çekilsin
+                    status("Netleniyor…")
+                    val pt = previewView.meteringPointFactory.createPoint(
+                        previewView.width / 2f, previewView.height / 2f, 0.08f
+                    )
+                    cam.cameraControl.startFocusAndMetering(
+                        FocusMeteringAction.Builder(pt, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
+                            .disableAutoCancel().build()
+                    )
+                    delay(1500)
+                }
                 for (i in 0 until frames) {
                     status("$title  ${i + 1}/$frames\nTelefonu kıpırdatma")
+                    if (field) awaitSteady()
                     if (focusMode) {
                         val d = near + (far - near) * i / (frames - 1)
                         c2.setCaptureRequestOptions(
@@ -655,13 +934,17 @@ class MainActivity : AppCompatActivity() {
                         delay(500) // merceğin yerine oturmasını bekle
                     }
                     val bmp = captureBitmap(ic, maxSide)
-                    withContext(Dispatchers.Default) { session.add(bmp) }
+                    withContext(Dispatchers.Default) {
+                        if (field) session.addLucky(bmp) else session.add(bmp)
+                    }
                 }
+                val details = if (field) baseDetails + ("Birleştirilen net kare" to "${session.used}") else baseDetails
                 status("Birleştiriliyor…")
                 val uri = withContext(Dispatchers.Default) {
                     val out = cropCenterBitmap(session.result(), extra)
-                    val u = ImageProcessor.saveJpeg(contentResolver, out, if (focusMode) "ODAKYIGINI" else "SUPERDETAY")
+                    val u = ImageProcessor.saveJpeg(contentResolver, out, if (field) "SAHA" else if (focusMode) "ODAKYIGINI" else "SUPERDETAY")
                     out.recycle()
+                    u?.let { writeRecord(it, title, details) }
                     u
                 }
                 if (uri != null) {
@@ -674,6 +957,7 @@ class MainActivity : AppCompatActivity() {
                 toast(if (e is OutOfMemoryError) "Bellek yetmedi, tekrar dene." else "Hata: ${e.message}")
             } finally {
                 if (focusMode) restoreFocus()
+                if (field) cam.cameraControl.cancelFocusAndMetering()
                 status(null)
                 setBusy(false)
             }
@@ -699,6 +983,7 @@ class MainActivity : AppCompatActivity() {
     private fun takePhoto() {
         val ic = imageCapture ?: return
         if (!btnCapture.isEnabled || busy) return
+        val details = captureDetails("Fotoğraf")
         val extra = extraZoom
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, "MAKRO_${timestamp()}.jpg")
@@ -723,6 +1008,7 @@ class MainActivity : AppCompatActivity() {
                         if (extra > 1.01f) {
                             withContext(Dispatchers.Default) { cropCenter(uri, extra) }
                         }
+                        withContext(Dispatchers.IO) { writeRecord(uri, "Fotoğraf", details) }
                         btnCapture.isEnabled = true
                         lastUri = uri
                         loadThumb(uri)

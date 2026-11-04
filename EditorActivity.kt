@@ -24,6 +24,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.pow
 
 @SuppressLint("ClickableViewAccessibility", "SetTextI18n")
 class EditorActivity : AppCompatActivity() {
@@ -73,6 +75,36 @@ class EditorActivity : AppCompatActivity() {
             adjust = adjust.copy(sharpness = it / 100f)
         }
 
+        slider(R.id.seekGamma, R.id.labelGamma, "Gama", 100, { "%.2f".format(2f.pow((it - 100) / 50f)) }) {
+            adjust = adjust.copy(gamma = 2f.pow((it - 100) / 50f))
+        }
+        slider(R.id.seekLocal, R.id.labelLocal, "Yerel kontrast", 0, { "$it" }) {
+            adjust = adjust.copy(localContrast = it / 100f)
+        }
+
+        val channelNames = listOf("Renkli", "Kırmızı", "Yeşil", "Mavi", "Gri")
+        val btnChannel = findViewById<Button>(R.id.btnChannel)
+        val btnInvert = findViewById<Button>(R.id.btnInvert)
+        val btnLevels = findViewById<Button>(R.id.btnLevels)
+        fun refreshToggles() {
+            btnChannel.text = "Kanal: ${channelNames[adjust.channel]}"
+            btnInvert.text = if (adjust.invert) "Negatif ●" else "Negatif"
+            btnLevels.text = if (adjust.autoLevels) "Oto seviye ●" else "Oto seviye"
+        }
+        refreshToggles()
+        btnChannel.setOnClickListener {
+            adjust = adjust.copy(channel = (adjust.channel + 1) % 5)
+            refreshToggles(); scheduleRender()
+        }
+        btnInvert.setOnClickListener {
+            adjust = adjust.copy(invert = !adjust.invert)
+            refreshToggles(); scheduleRender()
+        }
+        btnLevels.setOnClickListener {
+            adjust = adjust.copy(autoLevels = !adjust.autoLevels)
+            refreshToggles(); scheduleRender()
+        }
+
         findViewById<Button>(R.id.btnRotate).setOnClickListener {
             adjust = adjust.copy(rotation = (adjust.rotation + 90) % 360)
             scheduleRender()
@@ -80,6 +112,7 @@ class EditorActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnReset).setOnClickListener {
             adjust = Adjust()
             sliders.forEach { (s, init) -> s.progress = init }
+            refreshToggles()
             scheduleRender()
         }
         findViewById<Button>(R.id.btnCompare).setOnTouchListener { _, e ->
@@ -191,7 +224,11 @@ class EditorActivity : AppCompatActivity() {
         val result = withContext(Dispatchers.Default) {
             runCatching {
                 val reg = loader.decode(want, target) ?: return@runCatching null
-                val out = ImageProcessor.process(reg.bitmap, a, recycleSource = true)
+                val lv = ImageProcessor.levelsFor(base, a)
+                val previewBlock = max(4, min(base.width, base.height) / 80)
+                val regionScale = reg.bitmap.width.toFloat() / (reg.orientedRect.width() / k)
+                val block = (previewBlock * regionScale).toInt().coerceAtLeast(4)
+                val out = ImageProcessor.process(reg.bitmap, a, recycleSource = true, levels = lv, localBlock = block)
                 val r = RectF(reg.orientedRect)
                 r.left /= k; r.right /= k; r.top /= k; r.bottom /= k
                 ru.mapRect(r)
@@ -214,7 +251,7 @@ class EditorActivity : AppCompatActivity() {
         renderJob = lifecycleScope.launch {
             delay(80)
             val out = withContext(Dispatchers.Default) {
-                ImageProcessor.process(src, a, recycleSource = false)
+                ImageProcessor.process(src, a, recycleSource = false, levels = ImageProcessor.levelsFor(src, a))
             }
             processed = out
             imageView.setImageBitmapKeepZoom(out)
@@ -228,15 +265,17 @@ class EditorActivity : AppCompatActivity() {
         progress.visibility = View.VISIBLE
         lifecycleScope.launch {
             val saved = withContext(Dispatchers.Default) {
+                val lv = original?.let { ImageProcessor.levelsFor(it, a) }
                 var maxSide = SAVE_MAX
                 var result: Uri? = null
                 var done = false
                 while (!done && maxSide >= 1024) {
                     try {
                         val full = ImageProcessor.decode(contentResolver, uri, maxSide)
-                        val out = ImageProcessor.process(full, a, recycleSource = true)
+                        val out = ImageProcessor.process(full, a, recycleSource = true, levels = lv)
                         result = saveJpeg(out)
                         out.recycle()
+                        result?.let { writeRecord(it, a, uri) }
                         done = true
                     } catch (e: OutOfMemoryError) {
                         System.gc()
@@ -251,6 +290,28 @@ class EditorActivity : AppCompatActivity() {
             btnSave.isEnabled = true
             toast(if (saved != null) "Kaydedildi: Resimler/MakroKamera" else "Kaydedilemedi")
         }
+    }
+
+    /** Düzenlenmiş kopya için kayıt dosyası: kaynak dosya ve hash zinciri ile birlikte. */
+    private fun writeRecord(saved: Uri, a: Adjust, source: Uri) {
+        if (!EvidenceLog.enabled(this)) return
+        val names = listOf("renkli", "kırmızı", "yeşil", "mavi", "gri")
+        val details = listOf(
+            "Kaynak dosya" to source.toString(),
+            "Kaynak SHA-256" to (EvidenceLog.sha256(contentResolver, source) ?: "hesaplanamadı"),
+            "Kanal" to names[a.channel],
+            "Negatif" to (if (a.invert) "evet" else "hayır"),
+            "Oto seviye" to (if (a.autoLevels) "evet" else "hayır"),
+            "Gama" to "%.2f".format(a.gamma),
+            "Yerel kontrast" to "%.2f".format(a.localContrast),
+            "Keskinlik" to "%.2f".format(a.sharpness),
+            "Parlaklık" to "%.0f".format(a.brightness),
+            "Kontrast" to "%.2f".format(a.contrast),
+            "Doygunluk" to "%.2f".format(a.saturation),
+            "Sıcaklık" to "%.1f".format(a.warmth),
+            "Döndürme" to "${a.rotation}°"
+        )
+        EvidenceLog.write(this, saved, "Düzenlenmiş kopya (kaynak dosya değiştirilmedi)", details)
     }
 
     private fun saveJpeg(bmp: Bitmap): Uri? {

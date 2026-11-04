@@ -93,6 +93,43 @@
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <Button android:id="@+id/btnCase" style="@style/SmallBtn"
+                    android:layout_width="0dp" android:layout_height="wrap_content"
+                    android:layout_weight="1" android:text="Vaka bilgisi"
+                    android:textColor="#FFB300" />
+
+                <Button android:id="@+id/btnLog" style="@style/SmallBtn"
+                    android:layout_width="0dp" android:layout_height="wrap_content"
+                    android:layout_weight="1" android:text="Kayıt: AÇIK"
+                    android:textColor="#FFB300" />
+
+                <Button android:id="@+id/btnDigital" style="@style/SmallBtn"
+                    android:layout_width="0dp" android:layout_height="wrap_content"
+                    android:layout_weight="1" android:text="Dijital zoom: KAPALI"
+                    android:textColor="#FFB300" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <Button android:id="@+id/btnHires" style="@style/SmallBtn"
+                    android:layout_width="0dp" android:layout_height="wrap_content"
+                    android:layout_weight="1" android:text="Yüksek çözünürlük: AÇIK"
+                    android:textColor="#FFB300" />
+
+                <Button android:id="@+id/btnDiag" style="@style/SmallBtn"
+                    android:layout_width="0dp" android:layout_height="wrap_content"
+                    android:layout_weight="1" android:text="Kamera bilgisi"
+                    android:textColor="#FFB300" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
                 android:gravity="center_vertical"
                 android:orientation="horizontal">
 
@@ -128,21 +165,27 @@
 
             <TextView android:id="@+id/modePhoto"
                 android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:layout_marginEnd="6dp" android:paddingStart="14dp" android:paddingEnd="14dp"
+                android:layout_marginEnd="6dp" android:paddingStart="10dp" android:paddingEnd="10dp"
                 android:paddingTop="6dp" android:paddingBottom="6dp"
                 android:text="Foto" android:textSize="13sp" />
 
             <TextView android:id="@+id/modeStack"
                 android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:layout_marginEnd="6dp" android:paddingStart="14dp" android:paddingEnd="14dp"
+                android:layout_marginEnd="6dp" android:paddingStart="10dp" android:paddingEnd="10dp"
                 android:paddingTop="6dp" android:paddingBottom="6dp"
                 android:text="Odak Yığını" android:textSize="13sp" />
 
             <TextView android:id="@+id/modeSuper"
                 android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:paddingStart="14dp" android:paddingEnd="14dp"
+                android:layout_marginEnd="6dp" android:paddingStart="10dp" android:paddingEnd="10dp"
                 android:paddingTop="6dp" android:paddingBottom="6dp"
                 android:text="Süper Detay" android:textSize="13sp" />
+
+            <TextView android:id="@+id/modeField"
+                android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:paddingStart="10dp" android:paddingEnd="10dp"
+                android:paddingTop="6dp" android:paddingBottom="6dp"
+                android:text="Saha" android:textSize="13sp" />
         </LinearLayout>
 
         <!-- Hızlı yakınlaştırma düğmeleri -->

@@ -240,6 +240,32 @@ class FocusStacker(private val w: Int, private val h: Int) {
     }
 }
 
+/** Karenin merkez bölgesinin keskinliği (Laplace varyansı). Büyük = daha net. */
+fun centerSharpness(bmp: Bitmap): Double {
+    val sz = min(640, min(bmp.width, bmp.height))
+    val x0 = (bmp.width - sz) / 2
+    val y0 = (bmp.height - sz) / 2
+    val px = IntArray(sz * sz)
+    bmp.getPixels(px, 0, sz, x0, y0, sz, sz)
+    val l = IntArray(sz * sz)
+    for (i in px.indices) {
+        val p = px[i]
+        l[i] = (((p shr 16) and 255) * 77 + ((p shr 8) and 255) * 150 + (p and 255) * 29) shr 8
+    }
+    var sum = 0.0
+    var sum2 = 0.0
+    var n = 0
+    for (y in 1 until sz - 1) {
+        val b = y * sz
+        for (x in 1 until sz - 1) {
+            val v = (4 * l[b + x] - l[b + x - 1] - l[b + x + 1] - l[b + x - sz] - l[b + x + sz]).toDouble()
+            sum += v; sum2 += v * v; n++
+        }
+    }
+    val mean = sum / n
+    return sum2 / n - mean * mean
+}
+
 /** Bir çok-kare çekimini baştan sona yönetir. */
 class StackSession(private val focusMode: Boolean) {
     private var ref: AlignRef? = null
@@ -259,6 +285,20 @@ class StackSession(private val focusMode: Boolean) {
             if (fb !== bmp) fb.recycle()
         }
         bmp.recycle()
+    }
+
+    private var bestSharp = 0.0
+    var used = 0
+        private set
+
+    /** Şanslı kare: en iyi kareye göre belirgin şekilde bulanık kareleri atar. */
+    fun addLucky(bmp: Bitmap, keepRatio: Double = 0.7): Boolean {
+        val sh = centerSharpness(bmp)
+        if (used > 0 && sh < bestSharp * keepRatio) { bmp.recycle(); return false }
+        if (sh > bestSharp) bestSharp = sh
+        add(bmp)
+        used++
+        return true
     }
 
     fun result(): Bitmap {

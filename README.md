@@ -36,3 +36,15 @@ APK'yı telefona at, dosyaya dokun, "Bilinmeyen kaynaklardan yüklemeye izin ver
 ## Not
 Tarama özelliği Google Play Hizmetleri olan telefonlarda çalışır (ilk kullanımda modül indirilebilir).
 Manuel odak ve lens listesi telefon üreticisinin kameraya ne kadar erişim verdiğine bağlıdır.
+
+## Evrak incelemesi özellikleri (sürüm 1.5)
+- **Kayıt dosyası:** Her çekim ve her düzenlenmiş kopya için `Documents/MakroKamera/<ad>.kayit.txt` yazılır:
+  SHA-256, tarih-saat, cihaz, ayarlar ve vaka bilgisi. Düzenlenmiş kopyalarda kaynak dosyanın SHA-256 değeri de bulunur.
+  Orijinal dosyalar hiçbir zaman değiştirilmez; düzenleme her zaman yeni kopya üretir.
+- **Vaka bilgisi:** Kamera ekranında Ayar > Vaka bilgisi. Dosya no, inceleyen, not.
+- **İnceleme filtreleri (düzenleyici):** kanal ayırma (kırmızı/yeşil/mavi/gri), negatif, otomatik seviye, gama, yerel kontrast.
+- **USB mikroskop:** Telefon kamera olarak tanırsa "Lens" düğmesinde "USB" olarak görünür.
+
+## USB Mikroskop (ayrı uygulama)
+`usb` modülü, USB (UVC) mikroskop ve harici kameraları açan ayrı bir uygulamadır (UVCAndroid kütüphanesi).
+Ana uygulamadan bağımsızdır; derlenemezse ana APK yine çıkar.
