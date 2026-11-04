@@ -3,6 +3,8 @@ package com.makrokamera.app
 import android.annotation.SuppressLint
 import android.content.ContentValues
 import android.graphics.Bitmap
+import android.graphics.Matrix
+import android.graphics.RectF
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
@@ -21,6 +23,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.max
 
 @SuppressLint("ClickableViewAccessibility", "SetTextI18n")
 class EditorActivity : AppCompatActivity() {
@@ -38,6 +41,8 @@ class EditorActivity : AppCompatActivity() {
     private var original: Bitmap? = null
     private var processed: Bitmap? = null
     private var renderJob: Job? = null
+    private var detailJob: Job? = null
+    private var regionLoader: RegionLoader? = null
     private var adjust = Adjust()
     private val sliders = mutableListOf<Pair<SeekBar, Int>>()
 
@@ -46,6 +51,7 @@ class EditorActivity : AppCompatActivity() {
         setContentView(R.layout.activity_editor)
         imageView = findViewById(R.id.imageView)
         progress = findViewById(R.id.progress)
+        imageView.onViewChanged = { scheduleDetail() }
         btnSave = findViewById(R.id.btnSave)
 
         sourceUri = intent.data
@@ -78,9 +84,14 @@ class EditorActivity : AppCompatActivity() {
         }
         findViewById<Button>(R.id.btnCompare).setOnTouchListener { _, e ->
             when (e.actionMasked) {
-                MotionEvent.ACTION_DOWN -> original?.let { imageView.setImageBitmapKeepZoom(it) }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+                MotionEvent.ACTION_DOWN -> original?.let {
+                    imageView.overlayEnabled = false
+                    imageView.setImageBitmapKeepZoom(it)
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    imageView.overlayEnabled = true
                     processed?.let { imageView.setImageBitmapKeepZoom(it) }
+                }
             }
             true
         }
@@ -129,7 +140,71 @@ class EditorActivity : AppCompatActivity() {
             original = bmp
             processed = bmp
             imageView.setImageBitmapKeepZoom(bmp)
+
+            // Büyütünce orijinalden tam çözünürlüklü bölge okumak için hazırlan
+            val loader = withContext(Dispatchers.IO) { RegionLoader.open(contentResolver, uri) }
+            regionLoader = loader
+            if (loader != null) {
+                val mp = loader.orientedW.toDouble() * loader.orientedH / 1_000_000.0
+                val mpText = "%.1f".format(mp)
+                toast("Orijinal fotoğraf: ${loader.orientedW} x ${loader.orientedH} ($mpText MP)")
+                scheduleDetail()
+            }
         }
+    }
+
+    private fun scheduleDetail() {
+        detailJob?.cancel()
+        detailJob = lifecycleScope.launch {
+            delay(350)
+            updateDetail()
+        }
+    }
+
+    /** Büyütülmüş bölgeyi orijinalden tam çözünürlükte okuyup üstüne koyar. */
+    private suspend fun updateDetail() {
+        val loader = regionLoader ?: return
+        val base = original ?: return
+        val a = adjust
+        val s = imageView.currentScale()
+        val pw = base.width.toFloat()
+        val ph = base.height.toFloat()
+        val k = loader.orientedW / pw
+        // Önizleme zaten yeterliyse (küçük resim ya da az büyütme) katmana gerek yok
+        if (k < 1.05f || s < 0.9f) { imageView.setOverlay(null, null); return }
+
+        val vis = imageView.visibleRect()
+        val dw = if (a.rotation % 180 == 0) pw else ph
+        val dh = if (a.rotation % 180 == 0) ph else pw
+        vis.inset(-vis.width() * 0.15f, -vis.height() * 0.15f)
+        if (!vis.intersect(0f, 0f, dw, dh) || vis.isEmpty()) return
+
+        val ru = rotMatrix(a.rotation, pw, ph)
+        val inv = Matrix()
+        if (!ru.invert(inv)) return
+        val want = RectF(vis)
+        inv.mapRect(want)
+        want.left *= k; want.right *= k; want.top *= k; want.bottom *= k
+        if (!want.intersect(0f, 0f, loader.orientedW.toFloat(), loader.orientedH.toFloat())) return
+        val target = (max(vis.width(), vis.height()) * s).toInt().coerceAtLeast(64)
+
+        val result = withContext(Dispatchers.Default) {
+            runCatching {
+                val reg = loader.decode(want, target) ?: return@runCatching null
+                val out = ImageProcessor.process(reg.bitmap, a, recycleSource = true)
+                val r = RectF(reg.orientedRect)
+                r.left /= k; r.right /= k; r.top /= k; r.bottom /= k
+                ru.mapRect(r)
+                out to r
+            }.getOrNull()
+        }
+        if (result == null || a != adjust) return
+        imageView.setOverlay(result.first, result.second)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        regionLoader?.close()
     }
 
     private fun scheduleRender() {
